@@ -68,6 +68,10 @@
 
   function renderTable() {
     let apps = lsGet(LS_KEYS.APPLICATIONS, []);
+    
+    // Always sort by date newest first
+    apps.sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0));
+
     const query = els.search.value.trim().toLowerCase();
     const statusFilter = els.filter.value;
 
@@ -88,7 +92,7 @@
     els.noData.classList.add('hidden');
     els.tableWrapper.classList.remove('hidden');
 
-    [...apps].reverse().forEach(app => {
+    apps.forEach(app => {
       const sc = getStatusClass(app.status);
       const docCount = getDocCount(app);
       const row = document.createElement('tr');
@@ -490,9 +494,14 @@
     els.detailOverlay.classList.remove('hidden');
   }
 
+  let isInitialized = false;
   function init() {
     updateStats();
     renderTable();
+
+    if (isInitialized) return;
+    isInitialized = true;
+
     els.search.addEventListener('input', renderTable);
     els.filter.addEventListener('change', renderTable);
     els.closeDetailModal.addEventListener('click', () => {
@@ -512,5 +521,10 @@
     }
   }
 
-window.onDBReady ? window.onDBReady(init) : document.addEventListener('DOMContentLoaded', init);
+  // Initial load
+  if (window.DB_READY) init();
+  else document.addEventListener('DBLoaded', init);
+  
+  // Listen for background sync updates
+  document.addEventListener('DBLoaded', init);
 })();

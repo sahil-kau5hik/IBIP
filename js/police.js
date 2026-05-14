@@ -57,7 +57,8 @@
 
   // ===== RENDERING =====
   function getAppsForCity() {
-    return lsGet(LS_KEYS.APPLICATIONS, []).filter(a => a.pskCity === assignedCity);
+    const apps = lsGet(LS_KEYS.APPLICATIONS, []).filter(a => a.pskCity === assignedCity);
+    return apps.sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0));
   }
 
   function updateStats() {
@@ -291,11 +292,21 @@
     renderCompleted();
   }
 
+  let isInitialized = false;
   function init() {
     renderAll();
+    
+    if (isInitialized) return;
+    isInitialized = true;
+
     $('closeVerifyModal').addEventListener('click', () => $('verifyOverlay').classList.add('hidden'));
     $('verifyOverlay').addEventListener('click', e => { if (e.target === $('verifyOverlay')) $('verifyOverlay').classList.add('hidden'); });
   }
 
-window.onDBReady ? window.onDBReady(init) : document.addEventListener('DOMContentLoaded', init);
+  // Initial load
+  if (window.DB_READY) init();
+  else document.addEventListener('DBLoaded', init);
+  
+  // Listen for background sync updates
+  document.addEventListener('DBLoaded', init);
 })();

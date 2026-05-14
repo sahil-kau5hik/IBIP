@@ -96,7 +96,7 @@
         if (!pass) { $('policePassError').textContent = 'Password required'; $('policePassError').classList.add('visible'); return; }
         if (!city) { $('policeCityError').textContent = 'Select your assigned city'; $('policeCityError').classList.add('visible'); return; }
 
-        if (user === 'police' && pass === 'police123') {
+        if ((user === 'police' || user === 'police delhi') && pass === 'police123') {
           localStorage.setItem(LS_SESSION, JSON.stringify({
             role: 'police',
             name: `Officer ${user.toUpperCase()}`,

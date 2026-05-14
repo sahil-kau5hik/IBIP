@@ -7,11 +7,19 @@
   const $ = id => document.getElementById(id);
   const LS_SESSION = 'pe_session';
 
-  // If already logged in, redirect
+  // If already logged in, redirect to correct portal
   const session = JSON.parse(localStorage.getItem(LS_SESSION) || 'null');
-  if (session && session.role === 'user') {
-    window.location.href = '../index.html';
-    return;
+  if (session) {
+    if (session.role === 'admin') {
+      window.location.href = 'admin.html';
+      return;
+    } else if (session.role === 'police') {
+      window.location.href = 'police.html';
+      return;
+    } else {
+      window.location.href = '../index.html';
+      return;
+    }
   }
 
   // ===== TAB SWITCHING =====
@@ -56,12 +64,22 @@
 
   function createSession(user) {
     localStorage.setItem(LS_SESSION, JSON.stringify({
-      role: 'user',
+      role: user.role || 'user',
       name: user.name,
       email: user.email || '',
       phone: user.phone || '',
+      city: user.city || '',
       loginAt: new Date().toISOString()
     }));
+  }
+
+  function redirectBasedOnRole(role) {
+    let target = '../index.html';
+    if (role === 'admin') target = 'admin.html';
+    else if (role === 'police') target = 'police.html';
+    
+    showToast('Login successful! Redirecting...', 'success');
+    setTimeout(() => window.location.href = target, 1000);
   }
 
   // ===== OTP SIMULATION =====
@@ -99,28 +117,45 @@
     clearErrors();
     const isPhone = $('loginMethodPhone').classList.contains('active');
     const users = getUsers();
+    let user;
 
     if (isPhone) {
       const phone = $('loginPhone').value.trim();
       const otp = $('loginOtp').value.trim();
-      if (!/^[6-9]\d{9}$/.test(phone)) { showE('loginPhoneError', 'Enter valid 10-digit number'); return; }
+      if (!/^[6-9]\d{9}$/.test(phone) && phone !== 'admin' && phone !== 'police') { showE('loginPhoneError', 'Enter valid 10-digit number'); return; }
       if (!otp || otp.length !== 6) { showE('loginOtpError', 'Enter 6-digit OTP'); return; }
       if (otp !== generatedOtp) { showE('loginOtpError', 'Invalid OTP. Try again.'); return; }
-      const user = users.find(u => u.phone === phone);
+      
+      // Check for demo admin/police first
+      if (phone === 'admin') {
+         user = { name: 'Administrator', role: 'admin', phone: 'admin' };
+      } else if (phone === 'police') {
+         user = { name: 'Police Officer', role: 'police', phone: 'police', city: 'Delhi' };
+      } else {
+         user = users.find(u => u.phone === phone);
+      }
+      
       if (!user) { showE('loginPhoneError', 'No account with this number. Please sign up.'); return; }
-      createSession(user);
     } else {
       const email = $('loginEmail').value.trim().toLowerCase();
       const pass = $('loginPassword').value;
-      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showE('loginEmailError', 'Enter valid email'); return; }
+      if (!email) { showE('loginEmailError', 'Enter email'); return; }
       if (!pass) { showE('loginPasswordError', 'Enter password'); return; }
-      const user = users.find(u => u.email === email && u.password === pass);
+
+      // Check for demo admin/police
+      if (email === 'admin' && pass === 'admin123') {
+        user = { name: 'Administrator', role: 'admin', email: 'admin' };
+      } else if (email === 'police' && pass === 'police123') {
+        user = { name: 'Police Officer', role: 'police', email: 'police', city: 'Delhi' };
+      } else {
+        user = users.find(u => u.email === email && u.password === pass);
+      }
+      
       if (!user) { showE('loginPasswordError', 'Invalid email or password'); return; }
-      createSession(user);
     }
 
-    showToast('Login successful! Redirecting...', 'success');
-    setTimeout(() => window.location.href = '../index.html', 1000);
+    createSession(user);
+    redirectBasedOnRole(user.role);
   });
 
   // ===== SIGNUP =====
@@ -138,11 +173,11 @@
       if (!otp || otp.length !== 6) { showE('signupPhoneOtpError', 'Enter 6-digit OTP'); return; }
       if (otp !== generatedOtp) { showE('signupPhoneOtpError', 'Invalid OTP'); return; }
       if (users.find(u => u.phone === phone)) { showE('signupPhoneError', 'Number already registered. Login instead.'); return; }
-      const newUser = { name, phone, email: '', password: '', method: 'phone', createdAt: new Date().toISOString() };
+      const newUser = { name, phone, email: '', password: '', method: 'phone', role: 'user', createdAt: new Date().toISOString() };
       users.push(newUser);
       lsSet('pe_users', users);
       PE.saveUser(newUser);   // persist to Supabase
-      createSession({ name, phone });
+      createSession(newUser);
     } else {
       const name = $('signupName').value.trim();
       const email = $('signupEmail').value.trim().toLowerCase();
@@ -153,11 +188,11 @@
       if (!pass || pass.length < 6) { showE('signupPasswordError', 'Min 6 characters'); return; }
       if (pass !== confirm) { showE('signupConfirmError', 'Passwords do not match'); return; }
       if (users.find(u => u.email === email)) { showE('signupEmailError', 'Email already registered. Login instead.'); return; }
-      const newUser = { name, email, password: pass, phone: '', method: 'email', createdAt: new Date().toISOString() };
+      const newUser = { name, email, password: pass, phone: '', method: 'email', role: 'user', createdAt: new Date().toISOString() };
       users.push(newUser);
       lsSet('pe_users', users);
       PE.saveUser(newUser);   // persist to Supabase
-      createSession({ name, email });
+      createSession(newUser);
     }
 
     showToast('Account created! Redirecting...', 'success');
@@ -167,7 +202,7 @@
   // ===== GOOGLE (Simulation) =====
   $('btnGoogleLogin').addEventListener('click', () => {
     const users = getUsers();
-    const gUser = { name: 'Google User', email: 'user@gmail.com', password: '', phone: '', method: 'google', createdAt: new Date().toISOString() };
+    const gUser = { name: 'Google User', email: 'user@gmail.com', password: '', phone: '', method: 'google', role: 'user', createdAt: new Date().toISOString() };
     if (!users.find(u => u.email === gUser.email)) {
       users.push(gUser);
       lsSet('pe_users', users);

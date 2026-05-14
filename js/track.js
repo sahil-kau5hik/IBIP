@@ -39,13 +39,22 @@
     return '';
   }
 
-  function renderApps() {
+  function init() {
     const apps = lsGet(LS_KEYS.APPLICATIONS, []);
+    // Always sort by date newest first
+    apps.sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0));
+    
     container.innerHTML = '';
     if (apps.length === 0) { noMsg.classList.remove('hidden'); return; }
     noMsg.classList.add('hidden');
 
-    [...apps].reverse().forEach(app => {
+    // Doc name map — defined early so it can be used in docsFailedBanner and docBadges
+    const docNames = {
+      passportPhoto: '📷 Photo', aadhaarCard: '🢪 Aadhaar', panCard: '💳 PAN',
+      birthCertificate: '📜 DOB Proof', addressProof: '🏠 Address', signature: '✍️ Signature'
+    };
+
+    apps.forEach(app => {
       const sc = getStatusClass(app.status);
       const card = document.createElement('div');
       card.className = 'section-card';
@@ -123,10 +132,6 @@
         ? `<span style="background:rgba(99,102,241,.12);color:var(--accent);font-size:11px;font-weight:600;padding:3px 10px;border-radius:12px;margin-left:8px">🔄 ${app.applicationType}</span>` : '';
 
       // Doc badges
-      const docNames = {
-        passportPhoto: '📷 Photo', aadhaarCard: '🪪 Aadhaar', panCard: '💳 PAN',
-        birthCertificate: '📜 DOB Proof', addressProof: '🏠 Address', signature: '✍️ Signature'
-      };
       let docBadges = '';
       if (app.docs) {
         Object.keys(docNames).forEach(key => {
@@ -182,170 +187,102 @@
       container.appendChild(card);
     });
 
-    // Print handlers
-    container.querySelectorAll('[data-print]').forEach(btn => {
-      btn.addEventListener('click', e => { e.stopPropagation(); printApp(btn.dataset.print); });
-    });
+    // Attach delegated listeners after every render
+    attachDelegatedListeners();
+  }
 
-    // Renew handlers
-    container.querySelectorAll('[data-renew]').forEach(btn => {
-      btn.addEventListener('click', e => { 
-        e.stopPropagation(); 
-        localStorage.setItem('pe_renew_id', btn.dataset.renew);
-        window.location.href = 'apply.html';
-      });
-    });
+  // Event delegation — survives re-renders since container.innerHTML is cleared each time
+  function attachDelegatedListeners() {
+    // Remove old listener first to avoid duplicates
+    container.removeEventListener('click', handleContainerClick);
+    container.addEventListener('click', handleContainerClick);
 
-    // Re-upload handlers for failed docs
+    // Re-upload file inputs (need direct listeners since they're input[file])
     container.querySelectorAll('input[data-appid][data-dockey]').forEach(input => {
       input.addEventListener('change', function () {
         if (!this.files.length) return;
         const file = this.files[0];
         const appId = this.dataset.appid;
         const docKey = this.dataset.dockey;
-
         if (!['image/jpeg','image/png','image/webp'].includes(file.type)) {
           showToast('Invalid format. Only JPG, PNG, WebP.', 'error'); return;
         }
         if (file.size > 2 * 1024 * 1024) {
           showToast('File too large. Max 2MB.', 'error'); return;
         }
-
         const reader = new FileReader();
-        reader.onload = e => {
+        reader.onload = ev => {
           const apps = lsGet(LS_KEYS.APPLICATIONS, []);
           const app = apps.find(a => a.id === appId);
           if (!app) return;
-          app.docs[docKey] = e.target.result;
-          // Reset the failed doc status
+          app.docs[docKey] = ev.target.result;
           if (app.docStatus && app.docStatus[docKey]) {
             app.docStatus[docKey] = { status: 'pending', reason: '' };
           }
-          // Check if all failed docs are now re-uploaded
           const stillFailed = Object.entries(app.docStatus || {}).filter(([,v]) => v.status === 'fail');
           if (stillFailed.length === 0) {
-            app.status = 'Submitted'; // send back for doc re-verification by admin
+            app.status = 'Submitted';
             delete app.failedDocsMessage;
           }
           lsSet(LS_KEYS.APPLICATIONS, apps);
-          PE.saveApplication(app);  // persist re-upload to Supabase
-          showToast(`${docKey} re-uploaded! ${stillFailed.length === 0 ? 'Sent back to admin for verification.' : `${stillFailed.length} document(s) still need re-upload.`}`, 'success');
-          renderApps();
+          PE.saveApplication(app);
+          showToast(`Re-uploaded! ${stillFailed.length === 0 ? 'Sent back to admin for verification.' : `${stillFailed.length} more needed.`}`, 'success');
+          init();
         };
         reader.readAsDataURL(file);
       });
     });
   }
 
+  function handleContainerClick(e) {
+    const printBtn = e.target.closest('[data-print]');
+    if (printBtn) { e.stopPropagation(); printApp(printBtn.dataset.print); return; }
+    const renewBtn = e.target.closest('[data-renew]');
+    if (renewBtn) {
+      e.stopPropagation();
+      localStorage.setItem('pe_renew_id', renewBtn.dataset.renew);
+      window.location.href = 'apply.html';
+    }
+  }
+
   function printApp(appId) {
     const apps = lsGet(LS_KEYS.APPLICATIONS, []);
     const app = apps.find(a => a.id === appId);
     if (!app) return;
-    const sc = getStatusClass(app.status);
-
-    // Renewal info for print
-    let renewalPrint = '';
-    if (app.applicationType === 'Renewal' || app.applicationType === 'Re-issue') {
-      renewalPrint = `
-        <div class="detail-grid" style="margin-top:16px">
-          <div class="detail-item"><span class="detail-label">Application Type</span><span class="detail-value">🔄 ${app.applicationType}</span></div>
-          <div class="detail-item"><span class="detail-label">Old Passport</span><span class="detail-value">${app.oldPassportNumber || '-'}</span></div>
-          <div class="detail-item"><span class="detail-label">Reason</span><span class="detail-value">${app.renewalReason || '-'}</span></div>
+    const html = `
+      <div style="font-family:'Arial',sans-serif;max-width:600px;margin:0 auto;padding:30px;border:3px solid #1a56db;border-radius:12px">
+        <div style="text-align:center;margin-bottom:20px">
+          <div style="font-size:28px;font-weight:900;color:#1a56db">🛂 PassportEase</div>
+          <div style="font-size:13px;color:#666;margin-top:4px">Government of India — Ministry of External Affairs</div>
+          <div style="background:#1a56db;color:#fff;padding:6px 20px;border-radius:20px;display:inline-block;margin-top:10px;font-size:12px;font-weight:700">E-PASSPORT ACKNOWLEDGEMENT</div>
         </div>
-      `;
-    }
-
-    printArea.innerHTML = `
-      <div style="font-family: Arial, sans-serif; background: #fff; color: #000; padding: 12px 20px; max-width: 800px; margin: 0 auto; line-height: 1.4; border: 2px solid #000; box-sizing:border-box;">
-        
-        <!-- Header -->
-        <div style="text-align:center; padding-bottom: 12px; border-bottom: 2px solid #000; margin-bottom: 16px;">
-          <h1 style="font-size:22px; margin:0; text-transform:uppercase; letter-spacing:1px; line-height:1.2;">Ministry of External Affairs</h1>
-          <p style="font-size:15px; margin:2px 0 0; text-transform:uppercase; font-weight:bold;">Government of India</p>
-          <div style="margin-top:10px;">
-            <span style="font-size:16px; font-weight:bold; border: 2px solid #000; padding: 6px 14px; display:inline-block; border-radius: 4px; box-shadow: 2px 2px 0px #000;">OFFICIAL E-PASSPORT CERTIFICATE</span>
-          </div>
-        </div>
-
-        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom: 16px;">
-          <div style="flex:1;">
-            <table style="width:100%; font-size:14px; border-collapse: collapse;">
-              <tr><td style="padding:4px 0; width:150px; font-weight:bold;">Application ARN:</td><td style="padding:4px 0; font-family:monospace; font-weight:bold; font-size:16px;">${app.id}</td></tr>
-              <tr><td style="padding:4px 0; font-weight:bold;">Status:</td><td style="padding:4px 0;"><strong>${app.status}</strong></td></tr>
-              <tr><td style="padding:4px 0; font-weight:bold;">Date of Submission:</td><td style="padding:4px 0;">${app.dateFormatted || '-'}</td></tr>
-              <tr><td style="padding:4px 0; font-weight:bold;">PSK City:</td><td style="padding:4px 0;">${app.pskCity || '-'}</td></tr>
-              ${app.passportNumber ? `<tr><td style="padding:4px 0; font-weight:bold; color:green;">Passport Number:</td><td style="padding:4px 0; font-family:monospace; font-weight:bold; font-size:16px; color:green;">${app.passportNumber}</td></tr>` : ''}
-            </table>
-          </div>
-          <!-- Applicant Photo Placeholder -->
-          <div style="width: 110px; height: 130px; border: 2px solid #000; display:flex; align-items:center; justify-content:center; flex-direction:column; background:#f9f9f9; text-align:center; padding:8px;">
-            ${app.docs && app.docs.passportPhoto ? `<img src="${app.docs.passportPhoto}" style="width:100%; height:100%; object-fit:cover;" />` : `<span style="font-size:11px; font-weight:bold;">PASSPORT<br>SIZE<br>PHOTO</span>`}
-          </div>
-        </div>
-
-        <!-- Personal Details -->
-        <h3 style="font-size:15px; background:#f1f1f1; padding:6px 8px; border:1px solid #000; margin-bottom:10px; margin-top:0;">Personal Details</h3>
-        <table style="width:100%; font-size:13px; border-collapse: collapse; margin-bottom:16px;">
-          <tr><td style="padding:4px 6px; border:1px solid #ccc; width:150px; font-weight:bold;">Applicant Name</td><td style="padding:4px 6px; border:1px solid #ccc;" colspan="3">${app.fullName || '-'}</td></tr>
-          <tr>
-            <td style="padding:4px 6px; border:1px solid #ccc; font-weight:bold;">Date of Birth</td><td style="padding:4px 6px; border:1px solid #ccc; width:35%;">${app.dob || '-'}</td>
-            <td style="padding:4px 6px; border:1px solid #ccc; width:15%; font-weight:bold;">Gender</td><td style="padding:4px 6px; border:1px solid #ccc;">${app.gender || '-'}</td>
-          </tr>
-          <tr>
-            <td style="padding:4px 6px; border:1px solid #ccc; font-weight:bold;">Aadhaar Number</td><td style="padding:4px 6px; border:1px solid #ccc;">${app.aadhaarNumber || '-'}</td>
-            <td style="padding:4px 6px; border:1px solid #ccc; font-weight:bold;">Mobile Number</td><td style="padding:4px 6px; border:1px solid #ccc;">${app.mobile || '-'}</td>
-          </tr>
-          <tr><td style="padding:4px 6px; border:1px solid #ccc; font-weight:bold;">Present Address</td><td style="padding:4px 6px; border:1px solid #ccc;" colspan="3">${app.presentAddress || '-'}, ${app.presentCity || ''}, ${app.presentState || ''} - ${app.presentPincode || ''}</td></tr>
+        <hr style="border:1px solid #e5e7eb;margin:20px 0">
+        <table style="width:100%;font-size:14px;border-collapse:collapse">
+          <tr><td style="padding:8px;color:#666;width:40%">Application ID</td><td style="padding:8px;font-weight:700;font-family:monospace">${app.id}</td></tr>
+          <tr style="background:#f9fafb"><td style="padding:8px;color:#666">Passport Number</td><td style="padding:8px;font-weight:700;color:#1a56db;font-family:monospace">${app.passportNumber || 'N/A'}</td></tr>
+          <tr><td style="padding:8px;color:#666">Full Name</td><td style="padding:8px;font-weight:600">${app.fullName || '-'}</td></tr>
+          <tr style="background:#f9fafb"><td style="padding:8px;color:#666">Date of Birth</td><td style="padding:8px">${app.dob || '-'}</td></tr>
+          <tr><td style="padding:8px;color:#666">Gender</td><td style="padding:8px">${app.gender || '-'}</td></tr>
+          <tr style="background:#f9fafb"><td style="padding:8px;color:#666">Place of Birth</td><td style="padding:8px">${app.placeOfBirth || '-'}</td></tr>
+          <tr><td style="padding:8px;color:#666">Aadhaar</td><td style="padding:8px">${app.aadhaarNumber || '-'}</td></tr>
+          <tr style="background:#f9fafb"><td style="padding:8px;color:#666">PSK City</td><td style="padding:8px">${app.pskCity || '-'}</td></tr>
+          <tr><td style="padding:8px;color:#666">Application Type</td><td style="padding:8px">${app.applicationType || 'Fresh'}</td></tr>
+          <tr style="background:#f9fafb"><td style="padding:8px;color:#666">Submitted On</td><td style="padding:8px">${app.dateFormatted || '-'}</td></tr>
+          <tr><td style="padding:8px;color:#666">Status</td><td style="padding:8px"><strong style="color:green">✅ ${app.status}</strong></td></tr>
         </table>
-
-        ${app.applicationType === 'Renewal' || app.applicationType === 'Re-issue' ? `
-        <h3 style="font-size:15px; background:#f1f1f1; padding:6px 8px; border:1px solid #000; margin-bottom:10px; margin-top:0;">Renewal Details</h3>
-        <table style="width:100%; font-size:13px; border-collapse: collapse; margin-bottom:16px;">
-          <tr>
-            <td style="padding:4px 6px; border:1px solid #ccc; width:150px; font-weight:bold;">Application Type</td><td style="padding:4px 6px; border:1px solid #ccc;" colspan="3">🔄 ${app.applicationType}</td>
-          </tr>
-          <tr>
-            <td style="padding:4px 6px; border:1px solid #ccc; font-weight:bold;">Old Passport</td><td style="padding:4px 6px; border:1px solid #ccc; font-family:monospace; font-weight:bold;">${app.oldPassportNumber || '-'}</td>
-            <td style="padding:4px 6px; border:1px solid #ccc; font-weight:bold;">Renewal Reason</td><td style="padding:4px 6px; border:1px solid #ccc;">${app.renewalReason || '-'}</td>
-          </tr>
-        </table>
-        ` : ''}
-
-        <!-- Official Signatures & Stamp -->
-        <div style="margin-top:20px; display:flex; justify-content:space-between; align-items:flex-end;">
-          <div style="text-align:center;">
-            <div style="width:100px; height:100px; border:3px solid #d93025; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#d93025; font-weight:900; font-size:13px; position:relative; transform: rotate(-12deg); font-family:Arial, sans-serif; letter-spacing:1px; background: url('data:image/svg+xml;utf8,<svg viewBox=%220 0 100 100%22 xmlns=%22http://www.w3.org/2000/svg%22><text x=%2210%22 y=%2250%22 font-size=%2222%22 fill=%22%23d93025%22 opacity=%220.3%22 transform=%22rotate(45 50 50)%22>GOI</text></svg>');">
-              <span style="border: 2px solid #d93025; padding: 4px; border-radius: 4px;">VERIFIED</span>
-            </div>
-            <p style="margin-top:8px; font-weight:bold; font-size:11px; text-transform:uppercase;">Regional Passport Office</p>
-          </div>
-          
-          <div style="text-align:center;">
-             <!-- Applicant Sig Placeholder -->
-             ${app.docs && app.docs.signature ? `<img src="${app.docs.signature}" style="max-width:180px; max-height:60px; object-fit:contain; margin-bottom:5px;" />` : `<div style="height:60px; display:flex; align-items:center; justify-content:center; color:#999; font-style:italic;">(Signature Unavailable)</div>`}
-             <div style="border-top:1px solid #000; width:200px; margin-top:5px; padding-top:4px;"></div>
-             <p style="margin:0; font-weight:bold; font-size:11px;">APPLICANT SIGNATURE</p>
-          </div>
-
-          <div style="text-align:center;">
-            <div style="height:60px; display:flex; align-items:flex-end; justify-content:center;">
-              <p style="font-family:'Brush Script MT', cursive, sans-serif; font-size:28px; margin:0; position:relative; top:10px; color:#0e4683;">AK Sharma</p>
-            </div>
-            <div style="border-top:1px solid #000; width:200px; margin-top:5px; padding-top:4px;"></div>
-            <p style="margin:0; font-weight:bold; font-size:11px;">ISSUING AUTHORITY</p>
-          </div>
-        </div>
-        
-        <div style="margin-top: 16px; font-size:11px; text-align:center; color:#555; border-top: 1px dashed #ccc; padding-top: 8px;">
-          This is a system generated official e-Passport Certificate. Valid across all authorized physical and digital checkpoints.
-        </div>
+        <hr style="border:1px solid #e5e7eb;margin:20px 0">
+        <div style="text-align:center;font-size:11px;color:#999">This is a computer-generated acknowledgement. Printed on ${new Date().toLocaleDateString('en-IN')}</div>
       </div>
     `;
-    
-    // Automatically trigger print prompt
-    window.print();
+    const win = window.open('', '_blank', 'width=700,height=700');
+    win.document.write(`<!DOCTYPE html><html><head><title>E-Passport - ${app.id}</title></head><body>${html}</body></html>`);
+    win.document.close();
+    win.print();
   }
 
-  function init() { renderApps(); }
-window.onDBReady ? window.onDBReady(init) : document.addEventListener('DOMContentLoaded', init);
+  // Initial load
+  if (window.DB_READY) init();
+  else document.addEventListener('DBLoaded', init);
+  // Listen for background sync updates
+  document.addEventListener('DBLoaded', init);
 })();

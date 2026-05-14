@@ -35,24 +35,44 @@ function sbHeaders(extras = {}) {
 }
 
 async function sbFetch(path, opts = {}) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-    headers: sbHeaders(opts.headers || {}),
-    method: opts.method || 'GET',
-    body: opts.body ? JSON.stringify(opts.body) : undefined
-  });
-  if (!res.ok) {
-    const err = await res.text().catch(() => res.statusText);
-    throw new Error(`Supabase [${res.status}] ${path}: ${err}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      headers: sbHeaders(opts.headers || {}),
+      method: opts.method || 'GET',
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const err = await res.text().catch(() => res.statusText);
+      throw new Error(`Supabase [${res.status}] ${path}: ${err}`);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : null;
+  } catch (e) {
+    clearTimeout(timeoutId);
+    throw e;
   }
-  const text = await res.text();
-  return text ? JSON.parse(text) : null;
 }
 
 /* ─── KV Store (pe_store) ────────────────────────────────────── */
 async function loadKVStore() {
-  const rows = await sbFetch('pe_store?select=key,data');
-  if (Array.isArray(rows)) {
-    rows.forEach(r => { window.DB_CACHE[r.key] = r.data; });
+  try {
+    const rows = await sbFetch('pe_store?select=key,data');
+    if (Array.isArray(rows)) {
+      rows.forEach(r => {
+        // Skip applications — they are managed by pe_applications table, not KV store.
+        // Loading them from KV store would overwrite fresh status changes with stale data.
+        if (r.key === LS_KEYS.APPLICATIONS) return;
+        window.DB_CACHE[r.key] = r.data;
+      });
+    }
+  } catch (e) {
+    console.warn('loadKVStore failed:', e.message);
   }
 }
 
@@ -62,14 +82,17 @@ function lsGet(key, fallback) {
 
 function lsSet(key, value) {
   window.DB_CACHE[key] = value;
+  // ALWAYS write to localStorage (primary source of truth across pages)
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
+  // Applications have a dedicated Supabase table (pe_applications), skip pe_store for them
+  // to prevent stale KV data from overwriting fresh application statuses on page load
+  if (key === LS_KEYS.APPLICATIONS) return true;
+  // Background sync to Supabase KV store for other keys (theme, counters, etc.)
   sbFetch('pe_store', {
     method: 'POST',
     headers: { 'Prefer': 'resolution=merge-duplicates' },
     body: { key, data: value }
-  }).catch(e => {
-    console.warn('KV write failed, localStorage fallback:', e.message);
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
-  });
+  }).catch(e => console.warn('KV write failed:', e.message));
   return true;
 }
 
@@ -78,10 +101,16 @@ window.PE = {};
 
 /**
  * Save/upsert a full application object into pe_applications.
- * Maps JS camelCase fields → snake_case DB columns.
- * The `doc_data` JSONB column holds docs + docStatus + all other fields.
  */
 PE.saveApplication = async function (app) {
+  // ALWAYS update cache + localStorage immediately (source of truth)
+  const apps = lsGet(LS_KEYS.APPLICATIONS, []);
+  const idx = apps.findIndex(a => a.id === app.id);
+  if (idx >= 0) apps[idx] = app; else apps.push(app);
+  window.DB_CACHE[LS_KEYS.APPLICATIONS] = apps;
+  try { localStorage.setItem(LS_KEYS.APPLICATIONS, JSON.stringify(apps)); } catch (_) {}
+
+  // Background sync to Supabase
   const row = {
     id:               app.id,
     full_name:        app.fullName || '',
@@ -97,31 +126,17 @@ PE.saveApplication = async function (app) {
     date_formatted:   app.dateFormatted || null,
     passport_number:  app.passportNumber || null,
     rejection_reason: app.rejectionReason || null,
-    doc_data:         app   // full object stored as JSONB
+    doc_data:         app
   };
-
-  try {
-    await sbFetch('pe_applications', {
-      method: 'POST',
-      headers: { 'Prefer': 'resolution=merge-duplicates' },
-      body: row
-    });
-    // update local cache
-    const apps = lsGet(LS_KEYS.APPLICATIONS, []);
-    const idx = apps.findIndex(a => a.id === app.id);
-    if (idx >= 0) apps[idx] = app; else apps.push(app);
-    window.DB_CACHE[LS_KEYS.APPLICATIONS] = apps;
-  } catch (e) {
-    console.warn('PE.saveApplication DB failed, KV fallback:', e.message);
-    const apps = lsGet(LS_KEYS.APPLICATIONS, []);
-    const idx = apps.findIndex(a => a.id === app.id);
-    if (idx >= 0) apps[idx] = app; else apps.push(app);
-    lsSet(LS_KEYS.APPLICATIONS, apps);
-  }
+  sbFetch('pe_applications', {
+    method: 'POST',
+    headers: { 'Prefer': 'resolution=merge-duplicates' },
+    body: row
+  }).catch(e => console.warn('PE.saveApplication DB failed (data already in localStorage):', e.message));
 };
 
 /**
- * Load all applications. Returns the full JS objects from doc_data.
+ * Load all applications.
  */
 PE.loadApplications = async function () {
   try {
@@ -132,7 +147,7 @@ PE.loadApplications = async function () {
       return apps;
     }
   } catch (e) {
-    console.warn('PE.loadApplications DB failed, cache fallback:', e.message);
+    console.warn('PE.loadApplications DB failed:', e.message);
   }
   return lsGet(LS_KEYS.APPLICATIONS, []);
 };
@@ -141,29 +156,24 @@ PE.loadApplications = async function () {
  * Patch specific fields on an existing application.
  */
 PE.patchApplication = async function (appId, fields) {
-  // Always update in local cache first (optimistic)
   const apps = lsGet(LS_KEYS.APPLICATIONS, []);
   const app = apps.find(a => a.id === appId);
   if (app) Object.assign(app, fields);
+  // ALWAYS persist to cache + localStorage immediately
   window.DB_CACHE[LS_KEYS.APPLICATIONS] = apps;
+  try { localStorage.setItem(LS_KEYS.APPLICATIONS, JSON.stringify(apps)); } catch (_) {}
 
-  try {
-    // Build flat column updates
-    const colUpdate = {};
-    if (fields.status)          colUpdate.status          = fields.status;
-    if (fields.passportNumber)  colUpdate.passport_number = fields.passportNumber;
-    if (fields.rejectionReason) colUpdate.rejection_reason = fields.rejectionReason;
-    colUpdate.doc_data = app; // always sync the full object
-
-    await sbFetch(`pe_applications?id=eq.${encodeURIComponent(appId)}`, {
-      method: 'PATCH',
-      headers: { 'Prefer': 'return=minimal' },
-      body: colUpdate
-    });
-  } catch (e) {
-    console.warn('PE.patchApplication DB failed, KV fallback:', e.message);
-    lsSet(LS_KEYS.APPLICATIONS, apps);
-  }
+  // Background sync to Supabase
+  const colUpdate = {};
+  if (fields.status)          colUpdate.status          = fields.status;
+  if (fields.passportNumber)  colUpdate.passport_number = fields.passportNumber;
+  if (fields.rejectionReason) colUpdate.rejection_reason = fields.rejectionReason;
+  colUpdate.doc_data = app;
+  sbFetch(`pe_applications?id=eq.${encodeURIComponent(appId)}`, {
+    method: 'PATCH',
+    headers: { 'Prefer': 'return=minimal' },
+    body: colUpdate
+  }).catch(e => console.warn('PE.patchApplication DB failed (data already in localStorage):', e.message));
 };
 
 /* ─── Users (pe_users) ───────────────────────────────────────── */
@@ -172,7 +182,7 @@ PE.saveUser = async function (user) {
     name:       user.name  || null,
     email:      user.email || null,
     phone:      user.phone || null,
-    password:   user.password || null,   // plain-text for demo – use Supabase Auth in production
+    password:   user.password || null,
     method:     user.method || 'email',
     created_at: user.createdAt || new Date().toISOString()
   };
@@ -184,11 +194,11 @@ PE.saveUser = async function (user) {
     });
     // update local cache
     const users = lsGet('pe_users', []);
-    const idx = users.findIndex(u => u.email === user.email && user.email || u.phone === user.phone && user.phone);
+    const idx = users.findIndex(u => (u.email === user.email && user.email) || (u.phone === user.phone && user.phone));
     if (idx >= 0) users[idx] = user; else users.push(user);
     window.DB_CACHE['pe_users'] = users;
   } catch (e) {
-    console.warn('PE.saveUser DB failed, KV fallback:', e.message);
+    console.warn('PE.saveUser DB failed:', e.message);
     const users = lsGet('pe_users', []);
     const idx = users.findIndex(u => u.email === user.email || u.phone === user.phone);
     if (idx >= 0) users[idx] = user; else users.push(user);
@@ -204,7 +214,7 @@ PE.loadUsers = async function () {
       return rows;
     }
   } catch (e) {
-    console.warn('PE.loadUsers DB failed, cache fallback:', e.message);
+    console.warn('PE.loadUsers DB failed:', e.message);
   }
   return lsGet('pe_users', []);
 };
@@ -220,7 +230,7 @@ PE.saveComplaint = async function (complaint) {
   try {
     await sbFetch('pe_complaints', { method: 'POST', body: row });
   } catch (e) {
-    console.warn('PE.saveComplaint DB failed, KV fallback:', e.message);
+    console.warn('PE.saveComplaint DB failed:', e.message);
     const items = lsGet('pe_complaints', []);
     items.push(complaint);
     lsSet('pe_complaints', items);
@@ -229,25 +239,73 @@ PE.saveComplaint = async function (complaint) {
 
 /* ─── Boot ───────────────────────────────────────────────────── */
 async function initBackendCache() {
+  // STEP 1: Load from localStorage immediately (offline-first, fastest)
   try {
-    await loadKVStore();
-    // Pre-load applications into cache for faster first render
-    await PE.loadApplications();
-    await PE.loadUsers();
-  } catch (e) {
-    console.warn('Boot: Supabase unavailable, using localStorage fallback.', e.message);
-    // Populate cache from localStorage
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (k && k.startsWith('pe_')) {
         try { window.DB_CACHE[k] = JSON.parse(localStorage.getItem(k)); } catch (_) {}
       }
     }
-  }
+  } catch (e) {}
 
+  // STEP 2: Signal UI — data is ready (from localStorage)
   window.DB_READY = true;
   document.dispatchEvent(new Event('DBLoaded'));
 
+  // STEP 3: Background sync from Supabase (non-blocking)
+  // NOTE: PE.loadApplications has priority over loadKVStore for the applications key
+  // to avoid race condition where stale KV data overwrites fresh pe_applications data
+  try {
+    // Load applications from dedicated table (most reliable, newest data)
+    const appsFromDB = await Promise.race([
+      PE.loadApplications(),
+      new Promise(r => setTimeout(() => r(null), 5000)) // 5s timeout
+    ]);
+
+    // Merge: local data takes precedence for status (local is always most up-to-date)
+    if (Array.isArray(appsFromDB) && appsFromDB.length > 0) {
+      const localApps = JSON.parse(localStorage.getItem(LS_KEYS.APPLICATIONS) || '[]');
+      const STATUS_RANK = {
+        'Submitted': 1, 'Documents Failed': 1,
+        'Documents Verified': 2,
+        'Police Verified': 3,
+        'Admin Approved': 4,
+        'Passport Issued': 5,
+        'Rejected': 6
+      };
+      // For each Supabase app, prefer local if local has equal or more advanced status
+      const merged = appsFromDB.map(dbApp => {
+        const localApp = localApps.find(a => a.id === dbApp.id);
+        if (!localApp) return dbApp;
+        const localRank = STATUS_RANK[localApp.status] || 0;
+        const dbRank = STATUS_RANK[dbApp.status] || 0;
+        return localRank >= dbRank ? localApp : dbApp; // local wins on tie or more advanced
+      });
+      // Add local-only apps not yet in Supabase
+      const dbIds = new Set(appsFromDB.map(a => a.id));
+      const localOnly = localApps.filter(a => !dbIds.has(a.id));
+      const finalMerged = [...localOnly, ...merged];
+      window.DB_CACHE[LS_KEYS.APPLICATIONS] = finalMerged;
+      try { localStorage.setItem(LS_KEYS.APPLICATIONS, JSON.stringify(finalMerged)); } catch (_) {}
+    }
+
+    // Snapshot merged apps before loading KV (KV must not overwrite applications)
+    const protectedApps = window.DB_CACHE[LS_KEYS.APPLICATIONS];
+    // Load other KV data (theme, counters, users) — applications are skipped inside loadKVStore
+    await Promise.allSettled([loadKVStore(), PE.loadUsers()]);
+    // ALWAYS restore protectedApps — belt-and-suspenders in case something went wrong
+    if (protectedApps !== undefined) {
+      window.DB_CACHE[LS_KEYS.APPLICATIONS] = protectedApps;
+    }
+
+    // Refresh UI with synced data
+    document.dispatchEvent(new Event('DBLoaded'));
+  } catch (e) {
+    console.warn('Boot: Background sync error.', e.message);
+  }
+
+  // Finalize UI state
   initTheme();
   setActiveNav();
   initFontSize();

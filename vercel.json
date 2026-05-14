@@ -2,14 +2,14 @@
   "version": 2,
   "cleanUrls": true,
   "trailingSlash": false,
-  "redirects": [
-    { "source": "/login",        "destination": "/html/login",        "permanent": false },
-    { "source": "/apply",        "destination": "/html/apply",        "permanent": false },
-    { "source": "/track",        "destination": "/html/track",        "permanent": false },
-    { "source": "/admin",        "destination": "/html/admin",        "permanent": false },
-    { "source": "/admin-login",  "destination": "/html/admin-login",  "permanent": false },
-    { "source": "/police",       "destination": "/html/police",       "permanent": false },
-    { "source": "/police-login", "destination": "/html/police-login", "permanent": false }
+  "rewrites": [
+    { "source": "/login",        "destination": "/html/login.html" },
+    { "source": "/apply",        "destination": "/html/apply.html" },
+    { "source": "/track",        "destination": "/html/track.html" },
+    { "source": "/admin",        "destination": "/html/admin.html" },
+    { "source": "/admin-login",  "destination": "/html/admin-login.html" },
+    { "source": "/police",       "destination": "/html/police.html" },
+    { "source": "/police-login", "destination": "/html/police-login.html" }
   ],
   "headers": [
     {
@@ -36,3 +36,4 @@
     }
   ]
 }
+

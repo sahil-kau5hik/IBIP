@@ -457,16 +457,20 @@
       app.renewalReason = draft.renewalReason || '';
     }
 
-    // Update local cache
+    // STEP 1: Immediately save to localStorage so it shows everywhere even before Supabase responds
     const apps = lsGet(LS_KEYS.APPLICATIONS, []);
     apps.push(app);
     window.DB_CACHE[LS_KEYS.APPLICATIONS] = apps;
-    // Persist to Supabase pe_applications table
-    PE.saveApplication(app);
+    // Always persist to localStorage as primary fallback
+    try { localStorage.setItem(LS_KEYS.APPLICATIONS, JSON.stringify(apps)); } catch (_) {}
 
-    // Clear draft
+    // STEP 2: Clear draft BEFORE redirect
     localStorage.removeItem(LS_KEYS.DRAFT);
     localStorage.removeItem(LS_KEYS.DRAFT + '_docs');
+
+    // STEP 3: Background sync to Supabase (non-blocking)
+    PE.saveApplication(app);
+
     showToast(`Application ${appId} submitted! 🎉`, 'success');
     setTimeout(() => window.location.href = 'track.html', 1500);
   }
